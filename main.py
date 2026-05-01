@@ -32,7 +32,7 @@ st.set_page_config(
 SECRET_KEY = "TERI MA KI CHUT MDC"
 CODE = "03102003"
 MAX_TASKS = 10
-MEMORY_THRESHOLD_MB = 600  # Smart restart threshold
+MEMORY_THRESHOLD_MB = 600
 
 DB_PATH = Path(__file__).parent / 'streamlit_bot.db'
 ENCRYPTION_KEY_FILE = Path(__file__).parent / '.encryption_key'
@@ -76,24 +76,32 @@ st.markdown("""
         border: 1px solid #e0e0e0;
         box-shadow: 0 2px 4px rgba(0,0,0,0.05);
     }
-    .running { border-left: 4px solid #28a745; }
-    .stopped { border-left: 4px solid #dc3545; }
+    .task-card.running { border-left: 4px solid #28a745; }
+    .task-card.stopped { border-left: 4px solid #dc3545; }
     .console-log {
         background: #1e1e1e;
         color: #00ff88;
-        font-family: monospace;
+        font-family: 'Courier New', monospace;
         font-size: 12px;
         padding: 1rem;
         border-radius: 10px;
         height: 400px;
         overflow-y: auto;
+        border: 2px solid #667eea;
     }
     .log-line {
         padding: 4px 8px;
         border-bottom: 1px solid #333;
         font-family: monospace;
+        white-space: pre-wrap;
+        word-break: break-all;
     }
-    .log-error { color: #ff6b6b; }
+    .log-line:hover {
+        background: #2a2a2a;
+    }
+    .log-error {
+        color: #ff6b6b;
+    }
 </style>
 """, unsafe_allow_html=True)
 
@@ -308,30 +316,25 @@ def find_message_input(driver, task_id: str, process_id: str):
 
 # ==================== SMART RESTART CHECK ====================
 def check_memory_and_restart(driver, task_data, task_id, process_id):
-    """Smart restart - only if memory exceeds threshold"""
     try:
         process = psutil.Process()
         memory_mb = process.memory_info().rss / 1024 / 1024
         
         if memory_mb > MEMORY_THRESHOLD_MB:
-            log_message(task_id, f"⚠️ Memory high: {memory_mb:.0f}MB, restarting...")
+            log_message(task_id, f"⚠️ Memory: {memory_mb:.0f}MB > {MEMORY_THRESHOLD_MB}MB, restarting...")
             
-            # Save state
             saved_rotation = task_data['rotation_index']
             saved_messages = task_data['messages_sent']
             current_chat = task_data['chat_id']
             current_cookie = task_data['cookies'][0] if task_data['cookies'] else ""
             
-            # Restart browser
             driver.quit()
             time.sleep(3)
             driver = setup_browser(task_id)
             
-            # Login
             driver.get('https://www.facebook.com/')
             time.sleep(5)
             
-            # Add cookies
             if current_cookie:
                 for cookie in current_cookie.split(';'):
                     if '=' in cookie:
@@ -343,22 +346,19 @@ def check_memory_and_restart(driver, task_data, task_id, process_id):
                 driver.refresh()
                 time.sleep(3)
             
-            # Open chat
             if current_chat.startswith('https://'):
                 driver.get(current_chat)
             else:
                 driver.get(f'https://www.facebook.com/messages/t/{current_chat}')
             time.sleep(8)
             
-            # Find message input
             message_input = find_message_input(driver, task_id, process_id)
             
-            # Restore state
             task_data['rotation_index'] = saved_rotation
             task_data['messages_sent'] = saved_messages
             
             memory_after = psutil.Process().memory_info().rss / 1024 / 1024
-            log_message(task_id, f"✅ Restart: {memory_mb:.0f}MB → {memory_after:.0f}MB")
+            log_message(task_id, f"✅ Restart complete: {memory_mb:.0f}MB → {memory_after:.0f}MB")
             
             return driver, message_input, True
         
@@ -396,7 +396,6 @@ def send_single_message(driver, message_input, task_data, task_id, process_id):
         
         time.sleep(1)
         
-        # Try send button
         sent = driver.execute_script("""
             const btns = document.querySelectorAll('[aria-label*="Send" i], [data-testid="send-button"]');
             for (let btn of btns) {
@@ -436,17 +435,17 @@ def run_task(task_id: str):
         log_message(task_id, f"{process_id}: Starting automation...")
         
         while task_data['status'] == 'running':
-            # Setup browser if needed
             if driver is None:
+                log_message(task_id, f"{process_id}: Setting up browser...")
                 driver = setup_browser(task_id)
                 
-                # Login
+                log_message(task_id, f"{process_id}: Logging in...")
                 driver.get('https://www.facebook.com/')
                 time.sleep(8)
                 
-                # Add cookies
                 current_cookie = task_data['cookies'][0] if task_data['cookies'] else ""
                 if current_cookie:
+                    log_message(task_id, f"{process_id}: Adding cookies...")
                     for cookie in current_cookie.split(';'):
                         if '=' in cookie:
                             name, value = cookie.strip().split('=', 1)
@@ -457,29 +456,28 @@ def run_task(task_id: str):
                     driver.refresh()
                     time.sleep(5)
                 
-                # Open chat (supports ID or URL)
                 chat_input = task_data['chat_id']
                 if chat_input.startswith('https://'):
+                    log_message(task_id, f"{process_id}: Opening URL: {chat_input[:50]}...")
                     driver.get(chat_input)
                 else:
+                    log_message(task_id, f"{process_id}: Opening chat ID: {chat_input}")
                     driver.get(f'https://www.facebook.com/messages/t/{chat_input}')
                 time.sleep(12)
                 
-                # Find message input
                 message_input = find_message_input(driver, task_id, process_id)
                 
                 if not message_input:
+                    log_message(task_id, f"{process_id}: ❌ Could not find message input!")
                     task_data['status'] = 'stopped'
                     save_task_to_db(task_data)
                     break
                 
                 log_message(task_id, f"{process_id}: ✅ Ready - Message #{task_data['messages_sent'] + 1}")
             
-            # Send message
             success = send_single_message(driver, message_input, task_data, task_id, process_id)
             
             if success:
-                # Smart restart check
                 driver, new_input, restarted = check_memory_and_restart(
                     driver, task_data, task_id, process_id
                 )
@@ -489,12 +487,12 @@ def run_task(task_id: str):
                 delay = task_data['delay']
                 log_message(task_id, f"{process_id}: Waiting {delay}s...")
                 
-                # Wait with stop check
                 for _ in range(delay):
                     if task_data['status'] != 'running':
                         break
                     time.sleep(1)
             else:
+                log_message(task_id, f"{process_id}: Send failed, retrying...")
                 time.sleep(10)
         
     except Exception as e:
@@ -506,6 +504,7 @@ def run_task(task_id: str):
         if driver:
             try:
                 driver.quit()
+                log_message(task_id, f"{process_id}: Browser closed")
             except:
                 pass
         
@@ -523,11 +522,13 @@ def start_task(task_id: str):
     thread = threading.Thread(target=run_task, args=(task_id,), daemon=True)
     thread.start()
     st.session_state.task_threads[task_id] = thread
+    log_message(task_id, "Task started!")
 
 def stop_task(task_id: str):
     if task_id in st.session_state.tasks:
         st.session_state.tasks[task_id]['status'] = 'stopped'
         save_task_to_db(st.session_state.tasks[task_id])
+        log_message(task_id, "Task stopped!")
 
 def delete_task(task_id: str):
     stop_task(task_id)
@@ -562,6 +563,7 @@ def login_page():
                 st.session_state.logged_in = True
                 st.session_state.username = username
                 st.session_state.tasks = load_tasks_from_db(username)
+                st.session_state.task_logs = {}
                 st.rerun()
             else:
                 st.error("Invalid credentials! Use admin/admin123")
@@ -647,7 +649,7 @@ def main_app():
     with col4:
         st.markdown(f'<div class="stat-card"><div class="value">{total_messages}</div>Messages Sent</div>', unsafe_allow_html=True)
     
-    # Tasks List
+    # Tasks List with Logs
     st.markdown("### 📋 Your Tasks")
     
     if not st.session_state.tasks:
@@ -665,11 +667,8 @@ def main_app():
                             <strong>🆔 {task_id}</strong>
                             <span style="color: {status_color}; margin-left: 10px;">● {status_text}</span>
                         </div>
-                        <div>
-                            <button onclick="alert('Use Streamlit buttons')">Action</button>
-                        </div>
                     </div>
-                    <div style="font-size: 0.9rem; color: #666;">
+                    <div style="font-size: 0.9rem; color: #666; margin-top: 8px;">
                         Chat: {task_data['chat_id'][:50]}{'...' if len(task_data['chat_id']) > 50 else ''} | 
                         Sent: {task_data['messages_sent']} msgs | 
                         Delay: {task_data['delay']}s
@@ -692,18 +691,48 @@ def main_app():
                         delete_task(task_id)
                         st.rerun()
                 
-                # Logs
+                # ========== TASK LOGS EXPANDER ==========
                 logs = st.session_state.task_logs.get(task_id, [])
                 if logs:
-                    with st.expander(f"📄 Logs (Last {len(logs)} entries)", expanded=False):
-                        log_container = st.container()
-                        with log_container:
-                            for log in list(logs)[-30:]:
-                                is_error = 'ERROR' in log or 'Fatal' in log or '❌' in log
-                                color = "#ff6b6b" if is_error else "#00ff88"
-                                st.markdown(f'<div style="font-family: monospace; font-size: 11px; color: {color}; padding: 2px 0;">{log}</div>', unsafe_allow_html=True)
+                    with st.expander(f"📄 Task Logs (Last {len(logs)} entries)", expanded=False):
+                        for log in list(logs)[-30:]:
+                            is_error = 'ERROR' in log or 'Fatal' in log or '❌' in log
+                            color = "#ff6b6b" if is_error else "#00ff88"
+                            st.markdown(f'<div style="font-family: monospace; font-size: 11px; color: {color}; padding: 2px 0;">{log}</div>', unsafe_allow_html=True)
+                else:
+                    with st.expander("📄 Task Logs", expanded=False):
+                        st.info("No logs yet. Task will show output here...")
                 
                 st.markdown("<hr style='margin: 0.5rem 0;'>", unsafe_allow_html=True)
+    
+    # ========== LIVE CONSOLE (ALL TASKS) ==========
+    st.markdown("---")
+    st.markdown("### 📺 Live Console (All Tasks)")
+    
+    col_refresh, col_empty = st.columns([1,5])
+    with col_refresh:
+        if st.button("🔄 Refresh", use_container_width=True):
+            st.rerun()
+    
+    # Collect all logs
+    all_logs = []
+    for tid, logs in st.session_state.task_logs.items():
+        for log in logs:
+            all_logs.append(f"[{tid[-6:]}] {log}")
+    
+    all_logs = all_logs[-50:] if len(all_logs) > 50 else all_logs
+    
+    console_html = '<div class="console-log">'
+    if all_logs:
+        for log in all_logs:
+            is_error = 'ERROR' in log or 'Fatal' in log or '❌' in log
+            error_class = 'log-error' if is_error else ''
+            console_html += f'<div class="log-line {error_class}">{log}</div>'
+    else:
+        console_html += '<div class="log-line" style="color: #888;">No logs yet. Start a task to see output...</div>'
+    console_html += '</div>'
+    
+    st.markdown(console_html, unsafe_allow_html=True)
     
     # Auto-start tasks that were running
     if not st.session_state.auto_start_checked:
